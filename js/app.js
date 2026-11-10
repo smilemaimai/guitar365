@@ -234,7 +234,9 @@
           this.follow(noteX(L, i));
         }
       },
+      // 「彈對」模式：目標音跑出畫面時才平滑捲動一次
       follow(x) {
+        if (this.live) return;
         const w = wrap.clientWidth;
         if (x < wrap.scrollLeft + 40 || x > wrap.scrollLeft + w - 90) wrap.scrollTo({ left: Math.max(0, x - w * 0.3), behavior: 'smooth' });
       },
@@ -251,10 +253,15 @@
         $('#meter').style.width = Math.min(100, Math.sqrt(ev.rms / 0.25) * 100) + '%';
       },
       score(v, lbl, sub) { $('#scoreVal').textContent = v; if (lbl) $('#scoreLbl').textContent = lbl; $('#scoreSub').textContent = sub || ''; },
-      playhead(x) { const ph = $('#playhead'); ph.setAttribute('x1', x); ph.setAttribute('x2', x); },
+      // 示範與節奏模式：播放線每一格都在動，譜直接跟著定位（不用平滑捲動，否則動畫會一直被重啟而卡住）
+      playhead(x) {
+        const ph = $('#playhead'); ph.setAttribute('x1', x); ph.setAttribute('x2', x);
+        this.live = x >= 0;
+        if (this.live) wrap.scrollLeft = Math.max(0, x - wrap.clientWidth * 0.3);
+      },
       reset() {
         document.querySelectorAll('.tab .nt').forEach(e => e.classList.remove('cur', 'hit', 'miss', 'wrong', 'bad'));
-        ui.playhead(-20); ui.score('0%', mode === 'pitch' ? '正確率' : '命中', ''); $('#result').innerHTML = '';
+        ui.playhead(-20); wrap.scrollLeft = 0; ui.score('0%', mode === 'pitch' ? '正確率' : '命中', ''); $('#result').innerHTML = '';
         curEl = null; curN = null; $('#tgtNote').textContent = '–'; $('#tgtPos').textContent = ''; $('#heard').textContent = '–';
       },
     };
@@ -304,7 +311,7 @@
         ui.playhead(L._g.left + beats * L._g.ppb + 12);
         if (beats < 0) ui.score(String(Math.ceil(-beats)), '預備', '');
         while (k < evl.length && evl[k].t <= now) { ui.setCurrent(evl[k].i); k++; }
-        if (beats >= 0) { ui.score(`${Math.min(100, Math.round(beats / tb * 100))}%`, '示範', ''); ui.follow(L._g.left + beats * L._g.ppb + 12); }
+        if (beats >= 0) ui.score(`${Math.min(100, Math.round(beats / tb * 100))}%`, '示範', '');
         if (now > end + 0.3) { stopAll(); ui.reset(); return; }
         requestAnimationFrame(anim);
       })();

@@ -8,7 +8,7 @@
 
   // ---------- 儲存 ----------
   const LS = 'guitar365.v1';
-  const DEF = { gain: 1, gate: 0.012, tol: 'std', chordTol: 'std', latency: 0.08, octave: false, metro: 'full', clickVol: 0.6, pass: 80, introDone: false };
+  const DEF = { gain: 1, gate: 0.012, tol: 'std', chordTol: 'std', latency: 0.08, octave: false, metro: 'full', clickVol: 0.6, pass: 80, pitchMetro: true, introDone: false };
   let store = {};
   try { store = JSON.parse(localStorage.getItem(LS)) || {}; } catch (e) { store = {}; }
   store.lessons = store.lessons || {}; store.days = store.days || [];
@@ -279,8 +279,9 @@
       stopAll(); mode = m;
       document.querySelectorAll('.modes button').forEach(b => b.classList.toggle('on', b.dataset.mode === m));
       $('#modeDesc').innerHTML = m === 'pitch'
-        ? `照著六線譜一個一個彈，<b>不限時間</b>。彈對才會前進，彈錯會記一次失誤。${L.chords.length ? '↓ ↑ 是下刷、上刷整個和弦。' : ''}正確率 ≥ ${S().pass}% 拿到 <b>第一顆星 ★</b>。`
+        ? `照著六線譜一個一個彈，<b>不限時間</b>。彈對才會前進，彈錯會記一次失誤。${L.chords.length ? '↓ ↑ 是下刷、上刷整個和弦。' : ''}正確率 ≥ ${S().pass}% 拿到 <b>第一顆星 ★</b>。<label class="pm"><input type="checkbox" id="pMetro" ${S().pitchMetro ? 'checked' : ''}> 背景節拍器<small>照目前的 BPM 響，可以自己跟著拍子彈；不計分</small></label>`
         : `預備拍 ${L.bpb} 下後，跟著節拍器在<b>正確的時間</b>彈出<b>正確的音或和弦</b>。命中率 ≥ ${S().pass}% 且速度 ≥ ${L.bpm} BPM，拿到 <b>第二顆星 ★</b> 並完成本課。可以先降速練習。`;
+      const pm = $('#pMetro'); if (pm) pm.onchange = () => { S().pitchMetro = pm.checked; save(); };
       ui.reset();
     }
     function stopAll() { stopSession(); demoing = false; practicing = false; $('#demoBtn').textContent = '🔊 聽示範'; $('#startBtn').textContent = '🎤 開始練習'; $('#startBtn').classList.remove('stop'); }
@@ -326,7 +327,7 @@
       stopAll(); ui.reset();
       if (!(await needMic())) return;
       practicing = true; $('#startBtn').textContent = '■ 停止'; $('#startBtn').classList.add('stop');
-      sess = mode === 'pitch' ? pitchSession(L, ui, done) : rhythmSession(L, bpm, ui, done);
+      sess = mode === 'pitch' ? pitchSession(L, ui, done, () => bpm) : rhythmSession(L, bpm, ui, done);
     };
 
     function done(res) {
@@ -370,30 +371,45 @@
   // 模式 ①：彈對（不限時間）
   // 吉他的前一個音常常還在響（空弦、和弦餘音），所以不等「單一穩定音高」，
   // 而是：偵測到起音後的一小段時間內，只要有音框符合目標（音高或音級能量）就算對。
-  function pitchSession(L, ui, done) {
+  function pitchSession(L, ui, done, getBpm) {
     const idx = L.notes.map((n, i) => n.r ? -1 : i).filter(i => i >= 0);
-    let k = 0, mistakes = 0, pending = false, attackT = 0, hitT = -1;
+    let k = 0, mistakes = 0, pending = false, attackT = 0, hitT = -1, nearClick = false;
     ui.setCurrent(idx[0]); ui.score('0%', '進度', `0 / ${idx.length}`);
     const prog = () => ui.score(`${Math.round(k / idx.length * 100)}%`, '進度', `${k} / ${idx.length}・失誤 ${mistakes}`);
     const miss = () => { mistakes++; ui.flashWrong(idx[k]); prog(); };
+
+    // 背景節拍器：只是陪練，不影響判定。每 100 ms 預排接下來 0.3 秒內的拍點，所以中途改 BPM 或開關都會立刻生效
+    A.ensureCtx();
+    let nextT = A.now() + 0.35, beat = 0; const clicks = [];
+    const tick = () => {
+      const now = A.now();
+      if (!S().pitchMetro) { nextT = Math.max(nextT, now + 0.1); return; }
+      while (nextT < now + 0.3) { metro(L, nextT, beat++, S().clickVol * 0.6); clicks.push(nextT); nextT += 60 / getBpm(); }
+      while (clicks.length && clicks[0] < now - 1) clicks.shift();
+    };
+    tick(); const mi = setInterval(tick, 100);
+    // 麥克風可能收到節拍器的聲音：拍點附近的起音如果對不上目標，就當作沒發生，不算失誤
+    const byClick = (t) => clicks.some(c => t - c > -0.03 && t - c < S().latency + 0.12);
+
     const loop = makeLoop((ev, fr) => {
       ui.heard(ev);
       if (k >= idx.length) return;
       if (ev.onset && fr.t - hitT > 0.13) {
-        if (pending && fr.t - attackT > 0.15) miss();   // 上一下還沒被判定成「對」就又彈了下一下
-        pending = true; attackT = fr.t;
+        if (pending && !nearClick && fr.t - attackT > 0.15) miss();   // 上一下還沒被判定成「對」就又彈了下一下
+        pending = true; attackT = fr.t; nearClick = byClick(fr.t);
       }
       if (!pending) return;
       const n = L.notes[idx[k]];
       const ok = frameOK(L, n, ev);
       if (!ok && fr.t - attackT <= (n.c ? 0.6 : 0.45)) return;
       pending = false;
-      if (!ok) { miss(); return; }
+      if (!ok) { if (!nearClick) miss(); return; }
       hitT = fr.t; ui.mark(idx[k], 'hit'); k++; prog();
-      if (k >= idx.length) { loop.stop(); setTimeout(() => done({ mode: 'pitch', score: Math.round(idx.length / (idx.length + mistakes) * 100), mistakes }), 250); }
+      if (k >= idx.length) { stop(); A.stopAll(); setTimeout(() => done({ mode: 'pitch', score: Math.round(idx.length / (idx.length + mistakes) * 100), mistakes }), 250); }
       else ui.setCurrent(idx[k]);
     }, true);
-    return { stop() { loop.stop(); } };
+    function stop() { loop.stop(); clearInterval(mi); }
+    return { stop };
   }
 
   // 模式 ②：彈對＋節奏
